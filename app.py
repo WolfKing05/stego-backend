@@ -137,7 +137,7 @@ def encode_route():
             cover_arr = cv2.resize(cover_arr, (new_w, new_h))
             secret_arr = cv2.resize(secret_arr, (new_w, new_h))
 
-        stego_arr = encode_dct_dwt_color_array(cover_arr, secret_arr, alpha=0.01)
+        stego_arr = encode_dct_dwt_color_array(cover_arr, secret_arr, alpha=0.05)
         mem = bgr_np_to_png_bytes(stego_arr)
         return send_file(mem, mimetype="image/png", as_attachment=True, download_name="stego.png")
 
