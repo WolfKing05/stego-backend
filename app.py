@@ -162,7 +162,7 @@ def decode_route():
         if stego_arr.shape[:2] != cover_arr.shape[:2]:
             cover_arr = cv2.resize(cover_arr, (stego_arr.shape[1], stego_arr.shape[0]))
 
-        extracted_arr = decode_dct_dwt_color_array(stego_arr, cover_arr, alpha=0.01)
+        extracted_arr = decode_dct_dwt_color_array(stego_arr, cover_arr, alpha=0.05)
         mem = bgr_np_to_png_bytes(extracted_arr)
         return send_file(mem, mimetype="image/png", as_attachment=True, download_name="extracted.png")
 
