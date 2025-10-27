@@ -75,6 +75,7 @@ def decode_dct_dwt_color_array(stego_arr, cover_arr, alpha=0.01):
         extracted_channels.append(extracted)
 
     extracted_img = cv2.merge(extracted_channels)
+    extracted_img = cv2.normalize(extracted_img, None, 0, 255, cv2.NORM_MINMAX)
     return extracted_img
 
 # ---------------- Helpers to read uploaded files robustly ----------------
