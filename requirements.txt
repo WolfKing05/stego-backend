@@ -1,7 +1,7 @@
 Flask
 numpy
 opencv-python-headless
-pywt
+PyWavelets
 scipy
 Pillow
 gunicorn
