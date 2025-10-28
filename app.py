@@ -19,7 +19,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ------- Configurable parameters (tweak only these if needed) -------
 MAX_DIM = int(os.environ.get("MAX_DIM", 1024))      # max image dimension server-side
-BASE_ALPHA = float(os.environ.get("BASE_ALPHA", 0.06))  # base_alpha for adaptive embedding
+BASE_ALPHA = float(os.environ.get("BASE_ALPHA", 0.03))  # base_alpha for adaptive embedding
 MIN_ALPHA = 0.005
 MAX_ALPHA = 0.14
 
