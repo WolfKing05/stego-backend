@@ -12,13 +12,11 @@ from PIL import Image, ImageOps
 app = Flask(__name__)
 CORS(app)
 
-# -------- CONFIG --------
-ALPHA = 0.035          # tuned for good extraction without bleed
-MAX_DIM = 1024         # resize large inputs to keep processing fast
-# ------------------------
+# Tune for clarity without bleed
+ALPHA = 0.03
+MAX_DIM = 1024
 
 
-# ---- Utility helpers ----
 def apply_dct(block):
     return fft.dct(fft.dct(block.T, norm="ortho").T, norm="ortho")
 
@@ -31,8 +29,7 @@ def pil_to_bgr(file):
     img = Image.open(file)
     img = ImageOps.exif_transpose(img).convert("RGB")
     arr = np.array(img)
-    arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-    return arr
+    return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
 
 def bgr_to_png(bgr):
@@ -44,7 +41,7 @@ def bgr_to_png(bgr):
     return buf
 
 
-# ---- Core encode/decode ----
+# ---------- ENCODE ----------
 def encode_dct_dwt_color(cover, secret):
     h, w = cover.shape[:2]
     secret = cv2.resize(secret, (w, h))
@@ -60,16 +57,18 @@ def encode_dct_dwt_color(cover, secret):
         cA_dct = apply_dct(cA)
         sA_dct = apply_dct(sA)
 
-        embedded = cA_dct + ALPHA * sA_dct
-        cA_embedded = apply_idct(embedded)
-        stego_ch = pywt.idwt2((cA_embedded, (cH, cV, cD)), "haar")
-        stego_ch = np.clip(stego_ch, 0, 255).astype(np.uint8)
-        stego_channels.append(stego_ch)
+        # Embed secret's energy into cover
+        embedded_dct = cA_dct + ALPHA * sA_dct
+        cA_embedded = apply_idct(embedded_dct)
 
-    stego = cv2.merge(stego_channels)
-    return stego
+        stego = pywt.idwt2((cA_embedded, (cH, cV, cD)), "haar")
+        stego = np.clip(stego, 0, 255).astype(np.uint8)
+        stego_channels.append(stego)
+
+    return cv2.merge(stego_channels)
 
 
+# ---------- DECODE ----------
 def decode_dct_dwt_color(stego, cover):
     h, w = stego.shape[:2]
     cover = cv2.resize(cover, (w, h))
@@ -85,46 +84,52 @@ def decode_dct_dwt_color(stego, cover):
         sA_dct = apply_dct(sA)
         cA_dct = apply_dct(cA)
 
-        diff_dct = (sA_dct - cA_dct) / ALPHA
+        # Subtract scaled cover energy, but stabilize it
+        diff_dct = (sA_dct - cA_dct) / (ALPHA * 1.4)
         recovered = apply_idct(diff_dct)
-        recovered = np.clip(recovered, 0, 255).astype(np.uint8)
-        recovered = cv2.normalize(recovered, None, 0, 255, cv2.NORM_MINMAX)
+
+        # Local normalization per-channel
+        recovered -= recovered.min()
+        recovered /= recovered.max() + 1e-5
+        recovered = (recovered * 255).astype(np.uint8)
+
+        # Gentle denoise to remove cover edges
+        recovered = cv2.bilateralFilter(recovered, 5, 35, 35)
+
         extracted_channels.append(recovered)
 
     secret = cv2.merge(extracted_channels)
 
-    # --- contrast & sharpening ---
+    # Slight contrast equalization
     lab = cv2.cvtColor(secret, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=1.8, tileGridSize=(8, 8))
     l2 = clahe.apply(l)
     lab2 = cv2.merge((l2, a, b))
     secret = cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
 
-    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-    secret = cv2.filter2D(secret, -1, kernel)
     secret = np.clip(secret, 0, 255).astype(np.uint8)
     return secret
 
 
-# ---- Routes ----
+# ---------- ROUTES ----------
 @app.route("/")
 def home():
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "running"}), 200
 
 
 @app.route("/encode", methods=["POST"])
 def encode_route():
     try:
         if "cover" not in request.files or "secret" not in request.files:
-            return jsonify({"error": "Missing cover or secret"}), 400
+            return jsonify({"error": "Missing cover or secret image"}), 400
 
         cover = pil_to_bgr(request.files["cover"])
         secret = pil_to_bgr(request.files["secret"])
 
         if max(cover.shape[:2]) > MAX_DIM:
             scale = MAX_DIM / max(cover.shape[:2])
-            cover = cv2.resize(cover, (int(cover.shape[1] * scale), int(cover.shape[0] * scale)))
+            cover = cv2.resize(cover, (int(cover.shape[1]*scale), int(cover.shape[0]*scale)))
             secret = cv2.resize(secret, (cover.shape[1], cover.shape[0]))
 
         stego = encode_dct_dwt_color(cover, secret)
@@ -141,7 +146,7 @@ def encode_route():
 def decode_route():
     try:
         if "stego" not in request.files or "cover" not in request.files:
-            return jsonify({"error": "Missing stego or cover"}), 400
+            return jsonify({"error": "Missing stego or cover image"}), 400
 
         stego = pil_to_bgr(request.files["stego"])
         cover = pil_to_bgr(request.files["cover"])
