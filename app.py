@@ -1,5 +1,6 @@
-# app.py - Simple robust LSB steganography backend (drop-in replacement)
+# app.py - Robust LSB steganography backend with auto-detect header
 import os
+import traceback
 from io import BytesIO
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
@@ -9,25 +10,27 @@ import numpy as np
 app = Flask(__name__)
 CORS(app)
 
-# Limits
-MAX_DIM = 2048            # max cover dimension (to avoid huge uploads)
-BITS_PER_CHANNEL = 1      # how many LSBs per color channel to use (1 is safest)
-CHANNELS = 3              # use RGB channels
+# Config
+BITS_PER_CHANNEL = 1     # LSBs per color channel used (1 is safest)
+HEADER_BITS = 32         # 16 bits width + 16 bits height
+MAX_DIM = 2048           # max cover dimension allowed for processing
 
+
+# Helpers
 def pil_open_fix(fileobj):
     img = Image.open(fileobj)
     img = ImageOps.exif_transpose(img).convert("RGBA")
     return img
 
-def image_to_np_rgb(img):
-    # convert PIL RGBA to RGB numpy uint8
+def pil_to_rgb_np(img):
+    # Return HxWx3 uint8 RGB (composite alpha over white if present)
     if img.mode == "RGBA":
-        # composite over white to avoid transparency surprises
-        background = Image.new("RGBA", img.size, (255,255,255,255))
-        img = Image.alpha_composite(background, img).convert("RGB")
+        bg = Image.new("RGBA", img.size, (255,255,255,255))
+        img = Image.alpha_composite(bg, img).convert("RGB")
     else:
         img = img.convert("RGB")
-    return np.array(img, dtype=np.uint8)
+    arr = np.array(img, dtype=np.uint8)
+    return arr
 
 def np_to_png_bytes(arr):
     img = Image.fromarray(arr.astype(np.uint8))
@@ -36,90 +39,119 @@ def np_to_png_bytes(arr):
     buf.seek(0)
     return buf
 
-def check_cover_secret_sizes(cover_arr, secret_arr):
+def int_to_bits(value, bitcount):
+    return [(value >> (bitcount-1-i)) & 1 for i in range(bitcount)]
+
+def bits_to_int(bits):
+    v = 0
+    for b in bits:
+        v = (v << 1) | int(b)
+    return v
+
+# Capacity calculation
+def capacity_bits_for_cover(cover_arr):
+    H, W = cover_arr.shape[:2]
+    return H * W * 3 * BITS_PER_CHANNEL
+
+# Embed
+def lsb_embed_with_header(cover_arr, secret_arr):
     Hc, Wc = cover_arr.shape[:2]
     Hs, Ws = secret_arr.shape[:2]
-    capacity_bits = Hc * Wc * CHANNELS * BITS_PER_CHANNEL
-    secret_bits = Hs * Ws * 3 * 8  # secret as 8-bit RGB
-    return capacity_bits >= secret_bits
+    secret_bytes = secret_arr.reshape(-1)  # flattened bytes (R,G,B)...
+    secret_bits = np.unpackbits(secret_bytes)
+    header_bits = int_to_bits(Ws, 16) + int_to_bits(Hs, 16)  # width(16) then height(16)
+    full_bits = np.array(header_bits + secret_bits.tolist(), dtype=np.uint8)
 
-# --------- LSB encode/decode ---------
-def lsb_embed(cover_arr, secret_arr):
-    # cover_arr: HxWx3 uint8, secret_arr: hsxwsx3 uint8
-    Hc, Wc = cover_arr.shape[:2]
-    Hs, Ws = secret_arr.shape[:2]
+    cap = capacity_bits_for_cover(cover_arr)
+    if full_bits.size > cap:
+        raise ValueError("Secret too large for cover using current settings")
 
-    # flatten cover and secret channel-wise into bitstreams
-    cover_flat = cover_arr.reshape(-1)  # bytes
-    secret_flat = secret_arr.reshape(-1)
-
-    # convert secret bytes to bits
-    secret_bits = np.unpackbits(secret_flat)  # array of 0/1 length 8*N
-    # pad secret_bits to fit into cover capacity
-    capacity = cover_flat.size * BITS_PER_CHANNEL
-    if secret_bits.size > capacity:
-        raise ValueError("Secret too large for chosen cover image and BITS_PER_CHANNEL")
-
-    # create a copy of cover bytes to modify
-    out_bytes = np.array(cover_flat, copy=True)
-
-    # embed bits sequentially into LSBs of cover bytes
-    # we will use first capacity bits; remaining cover bytes untouched
-    # operate per byte: clear lowest BITS_PER_CHANNEL and set from secret_bits
-    # pack secret_bits into bytes to insert into successive cover bytes
-    # build a mask array for insertion
-    # We'll embed one bit per channel per pixel if BITS_PER_CHANNEL==1
-    # secret_bits currently length S; iterate and write
+    out = cover_arr.copy().reshape(-1)  # flatten bytes
     bit_idx = 0
-    for i in range(out_bytes.size):
-        if bit_idx >= secret_bits.size:
+    for i in range(out.size):
+        if bit_idx >= full_bits.size:
             break
-        # clear LSBs
-        out_bytes[i] = (out_bytes[i] & (~((1 << BITS_PER_CHANNEL) - 1)))
-        # form value from next BITS_PER_CHANNEL bits (if available)
+        # clear LSB(s)
+        mask = ~((1 << BITS_PER_CHANNEL) - 1) & 0xFF
+        out[i] = out[i] & mask
+        # pack next BITS_PER_CHANNEL bits into val
         val = 0
         for b in range(BITS_PER_CHANNEL):
-            if bit_idx < secret_bits.size:
-                val = (val << 1) | int(secret_bits[bit_idx])
+            if bit_idx < full_bits.size:
+                val = (val << 1) | int(full_bits[bit_idx])
                 bit_idx += 1
             else:
                 val = (val << 1)
-        out_bytes[i] |= val
+        out[i] = out[i] | val
 
-    # reshape back to image
-    out_arr = out_bytes.reshape(cover_arr.shape)
+    out_arr = out.reshape(cover_arr.shape)
     return out_arr
 
-def lsb_extract(stego_arr, secret_shape):
-    # stego_arr: HxWx3 uint8, secret_shape: (Hs, Ws, 3)
-    Hc, Wc = stego_arr.shape[:2]
-    Hs, Ws = secret_shape[:2]
-    secret_size = Hs * Ws * 3
-    # how many bits we will read
-    total_bits_needed = secret_size * 8
-
-    stego_flat = stego_arr.reshape(-1)
+# Extract
+def lsb_extract_autodetect(stego_arr):
+    flat = stego_arr.reshape(-1)
     bits = []
-    for byte in stego_flat:
-        # extract lowest BITS_PER_CHANNEL bits from this byte
+    # Read enough bits to get header first
+    needed_for_header = HEADER_BITS
+    i = 0
+    while len(bits) < needed_for_header and i < flat.size:
+        byte = int(flat[i])
+        for b in reversed(range(BITS_PER_CHANNEL)):
+            bits.append((byte >> b) & 1)
+            if len(bits) >= needed_for_header:
+                break
+        i += 1
+    if len(bits) < needed_for_header:
+        raise ValueError("Not enough data to read header")
+
+    header_width = bits_to_int(bits[:16])
+    header_height = bits_to_int(bits[16:32])
+    if header_width == 0 or header_height == 0:
+        raise ValueError("Invalid header dimensions detected")
+
+    secret_pixel_count = header_width * header_height * 3
+    secret_bits_needed = secret_pixel_count * 8
+    total_bits_needed = HEADER_BITS + secret_bits_needed
+
+    # continue reading remaining bits
+    while len(bits) < total_bits_needed and i < flat.size:
+        byte = int(flat[i])
         for b in reversed(range(BITS_PER_CHANNEL)):
             bits.append((byte >> b) & 1)
             if len(bits) >= total_bits_needed:
                 break
-        if len(bits) >= total_bits_needed:
-            break
+        i += 1
 
-    bits = np.array(bits, dtype=np.uint8)
-    # pack bits into bytes
-    if bits.size < total_bits_needed:
-        raise ValueError("Not enough bits in stego to recover secret")
-    bits = bits.reshape(-1, 8)
-    bytes_out = np.packbits(bits, axis=1)[:,0]
-    secret_flat = bytes_out.flatten()
-    secret_arr = secret_flat.reshape((Hs, Ws, 3)).astype(np.uint8)
+    if len(bits) < total_bits_needed:
+        raise ValueError("Not enough embedded bits for full secret image")
+
+    secret_bits = np.array(bits[HEADER_BITS:HEADER_BITS+secret_bits_needed], dtype=np.uint8)
+    secret_bytes = np.packbits(secret_bits)
+    secret_arr = secret_bytes.reshape((header_height, header_width, 3)).astype(np.uint8)
     return secret_arr
 
-# --------- Endpoints ---------
+# Auto-resize secret to fit capacity if needed (while preserving aspect)
+def ensure_secret_fits(cover_arr, secret_img_arr):
+    cap_bits = capacity_bits_for_cover(cover_arr)
+    max_secret_bytes = (cap_bits - HEADER_BITS) // 8
+    if max_secret_bytes <= 0:
+        raise ValueError("Cover too small to embed any secret")
+    cur_bytes = secret_img_arr.size
+    if cur_bytes <= max_secret_bytes:
+        return secret_img_arr
+    # compute scaling factor
+    Hs, Ws = secret_img_arr.shape[:2]
+    cur_pixels = Hs * Ws
+    max_pixels = max_secret_bytes // 3
+    scale = (max_pixels / cur_pixels) ** 0.5
+    new_w = max(1, int(Ws * scale))
+    new_h = max(1, int(Hs * scale))
+    from PIL import Image
+    pil = Image.fromarray(secret_img_arr)
+    pil2 = pil.resize((new_w, new_h), Image.LANCZOS)
+    return np.array(pil2, dtype=np.uint8)
+
+# Routes
 @app.route("/")
 def index():
     return jsonify({"service":"LSB Stego API","status":"ok"}), 200
@@ -133,57 +165,41 @@ def encode_route():
         cover_img = pil_open_fix(request.files["cover"])
         secret_img = pil_open_fix(request.files["secret"])
 
-        # convert to RGB numpy
-        cover_arr = image_to_np_rgb(cover_img)
-        secret_arr = image_to_np_rgb(secret_img)
+        # limit cover size for safety
+        if max(cover_img.size) > MAX_DIM:
+            scale = MAX_DIM / max(cover_img.size)
+            cover_img = cover_img.resize((int(cover_img.width*scale), int(cover_img.height*scale)), Image.LANCZOS)
 
-        # optionally resize secret to fit - here we allow embedding at full secret size if fits,
-        # otherwise automatically scale secret down while preserving aspect ratio
-        if not check_cover_secret_sizes(cover_arr, secret_arr):
-            # compute max pixels allowed for secret
-            cap_bits = cover_arr.size * BITS_PER_CHANNEL
-            max_secret_bytes = cap_bits // 8
-            max_pixels = max_secret_bytes // 3
-            # scale secret so Hs*Ws <= max_pixels
-            h, w = secret_arr.shape[:2]
-            scale = (max_pixels / (h*w)) ** 0.5
-            if scale <= 0:
-                return jsonify({"error":"cover too small to embed any secret"}), 400
-            new_w = max(1, int(w * scale))
-            new_h = max(1, int(h * scale))
-            secret_img = secret_img.resize((new_w, new_h), Image.LANCZOS)
-            secret_arr = image_to_np_rgb(secret_img)
+        cover_arr = pil_to_rgb_np(cover_img)
+        secret_arr = pil_to_rgb_np(secret_img)
 
-        # embed
-        stego_arr = lsb_embed(cover_arr, secret_arr)
+        # auto-resize secret if needed
+        secret_arr = ensure_secret_fits(cover_arr, secret_arr)
 
+        stego_arr = lsb_embed_with_header(cover_arr, secret_arr)
         buf = np_to_png_bytes(stego_arr)
         return send_file(buf, mimetype="image/png", as_attachment=True, download_name="stego.png")
     except Exception as e:
-        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+        tb = traceback.format_exc()
+        print(tb)
+        return jsonify({"error": str(e), "trace": tb}), 500
 
 @app.route("/decode", methods=["POST"])
 def decode_route():
     try:
-        if "stego" not in request.files or "secret_shape" not in request.form:
-            return jsonify({"error":"upload 'stego' and provide 'secret_shape' as 'HxW' in form"}), 400
+        if "stego" not in request.files:
+            return jsonify({"error":"upload 'stego' file"}), 400
 
         stego_img = pil_open_fix(request.files["stego"])
-        stego_arr = image_to_np_rgb(stego_img)
+        stego_arr = pil_to_rgb_np(stego_img)
 
-        # parse secret shape from form, format "HxW" (e.g. 128x128)
-        shape_str = request.form.get("secret_shape")
-        try:
-            parts = shape_str.lower().split('x')
-            Hs = int(parts[0]); Ws = int(parts[1])
-        except Exception:
-            return jsonify({"error":"invalid secret_shape format; use HxW (e.g. 128x128)"}), 400
-
-        secret_arr = lsb_extract(stego_arr, (Hs, Ws, 3))
+        secret_arr = lsb_extract_autodetect(stego_arr)
         buf = np_to_png_bytes(secret_arr)
         return send_file(buf, mimetype="image/png", as_attachment=True, download_name="extracted.png")
     except Exception as e:
-        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+        tb = traceback.format_exc()
+        print(tb)
+        return jsonify({"error": str(e), "trace": tb}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT",8080)))
