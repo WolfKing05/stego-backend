@@ -1,8 +1,6 @@
-Flask
+Flask>=2.0
 numpy
-opencv-python-headless
-PyWavelets
-scipy
 Pillow
 gunicorn
 flask-cors
+flask-limiter
