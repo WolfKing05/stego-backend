@@ -76,13 +76,6 @@ curl -X POST "https://stego-backend-l72r.onrender.com/encode" \
   -F "cover=@cover.png" \
   -F "secret=@secret.png" \
   --output stego.png
-
-Here’s the **next complete `.md` section** that you can copy and paste **directly after** your current code.
-It continues seamlessly from where you stopped and completes your backend README professionally.
-
----
-
-```markdown
 ```
 
 ---
