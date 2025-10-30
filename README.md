@@ -1,4 +1,4 @@
-# 🧠 Rahasya — DWT-DCT Image Steganography (Backend API)
+# 🕵️‍♂️ Rahasya — DWT-DCT Image Steganography (Backend API)
 
 > **Project Component:** Flask Cloud API  
 > **Author:** Aryan Patel  
