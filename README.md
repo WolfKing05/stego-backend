@@ -260,11 +260,11 @@ For **educational and demonstrative use** only.
 
 ## 🏁 Summary
 
--✅ **Frontend:** [https://rahasya.netlify.app](https://rahasya.netlify.app)
--✅ **Backend API:** [https://stego-backend-l72r.onrender.com](https://stego-backend-l72r.onrender.com)
--✅ **Domains:** Digital Image Processing + Cloud Computing
--✅ **Technique:** Hybrid DWT-DCT Steganography
--✅ **Deployment:** Netlify (UI) + Render (API)
+✅ **Frontend:** [https://rahasya.netlify.app](https://rahasya.netlify.app)
+✅ **Backend API:** [https://stego-backend-l72r.onrender.com](https://stego-backend-l72r.onrender.com)
+✅ **Domains:** Digital Image Processing + Cloud Computing
+✅ **Technique:** Hybrid DWT-DCT Steganography
+✅ **Deployment:** Netlify (UI) + Render (API)
 
 ---
 
