@@ -1,5 +1,9 @@
 # 🕵️‍♂️ Rahasya — DWT-DCT Image Steganography (Backend API)
 
+<p align="center">
+  <img src="https://github.com/wolfking05/stego-backend/raw/main/rahasya.png" alt="Rahasya Backend Architecture" width="800"/>
+</p>
+
 > **Project Component:** Flask Cloud API  
 > **Author:** Aryan Patel  
 > **Year:** 2025  
